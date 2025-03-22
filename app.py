@@ -1,131 +1,130 @@
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup, Comment
+from bs4 import BeautifulSoup
 import pandas as pd
 from serpapi import GoogleSearch
 from openai import OpenAI
-from pydantic import BaseModel
 
 # --- Configuration ---
-open_api_key = st.secrets["OPENAI_API"]  # Replace with your OpenAI API key
+open_api_key = st.secrets["OPENAI_API"]
 SERPAPI_API_KEY = "6c2d737aa68c281962070dc62054aa7e0ebba529957364ec07bdaa3f8c7e296b"
-
 
 client = OpenAI(api_key=open_api_key)
 
-
 # --- Functions ---
-
 def get_visible_text(url):
-    """
-    Extracts and returns the concatenated text from all <p> tags found in the webpage.
-    """
     try:
         response = requests.get(url, timeout=10)
         soup = BeautifulSoup(response.content, 'html.parser')
-        paragraphs = []
-        elements = soup.find_all('p')
-        for element in elements:
-            text_content = element.get_text(strip=True)
-            if text_content:
-                paragraphs.append(text_content)
+        paragraphs = [p.get_text(strip=True) for p in soup.find_all('p') if p.get_text(strip=True)]
         return "\n".join(paragraphs)
     except Exception as e:
         return f"Error fetching text: {e}"
 
 def summarize_news(url):
-    """
-    Summarizes the news article found at the given URL.
-    Uses OpenAI's chat completion with a prompt tailored for summarization.
-    """
     news_text = get_visible_text(url)
     try:
         completion = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4",
             messages=[
-                {
-                    "role": "system",
-                    "content": """You are a smart analyst whose job is to summarize the news provided in 3 bullet points for the leadership team. 
-                                  The input will be from the text scrapped from the website so ignore website related text and focus only on news text.
-                    """
-                },
-
-                {
-                    'role': 'user',
-                    'content': get_visible_text(url)
-                }
+                {"role": "system", "content": "Summarize this news in 3 bullet points focusing on drug development aspects. Ignore website-specific text."},
+                {"role": "user", "content": news_text}
             ],
-          temperature=0.1  
+            temperature=0.1
         )
-
-        return(completion.choices[0].message.content)
+        return completion.choices[0].message.content
     except Exception as e:
         return f"Error summarizing news: {e}"
 
-# Define Pydantic model for tags
-class NewsTags(BaseModel):
-    tags: list[str]
-
-def get_news_tags(news_summary):
-    """
-    Uses OpenAI's beta function call (or equivalent) to extract up to 5 tags from the provided news summary.
-    The response is validated against the NewsTags model.
-    """
+def categorize_news(summary):
     try:
-        completion = client.beta.chat.completions.parse(
-            model="gpt-4o-2024-08-06",
+        completion = client.chat.completions.create(
+            model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are a lifesciences news analyzer. Extract the possible news tags from the provide news. Provide maximum 5 tags"},
-                {"role": "user", "content": str(news_summary)},
+                {"role": "system", "content": "Classify this news into ONLY ONE of these categories: Clinical, Regulatory, Commercial. Respond only with the category name."},
+                {"role": "user", "content": summary}
             ],
-            response_format=NewsTags,
+            temperature=0.1
         )
-        # Extract tags from the parsed response.
-        return completion.choices[0].message.parsed.tags
+        category = completion.choices[0].message.content.strip()
+        return category if category in ['Clinical', 'Regulatory', 'Commercial'] else 'Other'
     except Exception as e:
-        return f"Error extracting tags: {e}"
+        return f"Error: {e}"
+
+def extract_moa(drug_name, summaries):
+    try:
+        completion = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": f"Identify the mechanism of action for {drug_name} from these news summaries. Respond concisely."},
+                {"role": "user", "content": "\n".join(summaries)}
+            ],
+            temperature=0.1
+        )
+        return completion.choices[0].message.content.strip()
+    except Exception as e:
+        return "MoA not available"
 
 # --- Streamlit App ---
+st.title("Pharma News Analyzer")
 
-st.title("News Summarizer and Tag Extractor")
+# User input for drug molecules
+drugs_input = st.text_input("Enter drug molecules (comma-separated)", "Jardiance, Ozempic")
+drug_list = [d.strip() for d in drugs_input.split(',')]
 
-# User input for the news topic
-topic = st.text_input("Enter a news topic", "bristol myers squibb bms")
-
-if st.button("Get News"):
-    with st.spinner('Fetching news, summarizing, and extracting tags...'):
-        params = {
-          "api_key": SERPAPI_API_KEY,
-          "engine": "google",
-          "q": topic,
-          "google_domain": "google.com",
-          "gl": "us",
-          "hl": "en",
-          "tbm": "nws",
-          "tbs": "qdr:w"
-        }
-
-        search = GoogleSearch(params)
-        results = search.get_dict()
-
-        news_results = results.get('news_results', [])
-        news_data = []
-
-        for item in news_results[:3]:
-            link = item.get('link')
-            title = item.get('title')
-            snippet = item.get('snippet')
-
-            summary = summarize_news(link)
-            tags = get_news_tags(summary)
-
-            news_data.append({
-                "Title": title,
-                "Link": link,
-                "Snippet": snippet,
-                "Summary": summary,
-                "Tags": tags
+if st.button("Analyze News"):
+    all_data = []
+    
+    for drug in drug_list:
+        with st.spinner(f'Processing {drug}...'):
+            # Get news results
+            params = {
+                "api_key": SERPAPI_API_KEY,
+                "engine": "google",
+                "q": f"{drug} pharmaceutical news",
+                "google_domain": "google.com",
+                "gl": "us",
+                "hl": "en",
+                "tbm": "nws",
+                "tbs": "qdr:w",
+                "num": 5
+            }
+            
+            search = GoogleSearch(params)
+            results = search.get_dict()
+            news_results = results.get('news_results', [])
+            
+            # Process news articles
+            clinical, regulatory, commercial = [], [], []
+            summaries = []
+            
+            for item in news_results[:5]:  # Process top 5 results
+                link = item.get('link')
+                summary = summarize_news(link)
+                if "Error" not in summary:
+                    category = categorize_news(summary)
+                    summaries.append(summary)
+                    
+                    if category == 'Clinical':
+                        clinical.append(summary)
+                    elif category == 'Regulatory':
+                        regulatory.append(summary)
+                    elif category == 'Commercial':
+                        commercial.append(summary)
+            
+            # Extract MoA
+            moa = extract_moa(drug, summaries) if summaries else "MoA not available"
+            
+            # Prepare data for table
+            all_data.append({
+                "Molecule (Company)": drug,
+                "Mechanism of Action": moa,
+                "Regulatory News": "\n\n".join(regulatory) if regulatory else "No regulatory news",
+                "Clinical News": "\n\n".join(clinical) if clinical else "No clinical news",
+                "Commercial News": "\n\n".join(commercial) if commercial else "No commercial news"
             })
-
-        df = pd.DataFrame(news_data)
-        st.dataframe(df)
+    
+    # Display results
+    df = pd.DataFrame(all_data)
+    st.dataframe(df, height=800, use_container_width=True)
+    st.success("Analysis complete!")

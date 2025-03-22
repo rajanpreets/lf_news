@@ -106,7 +106,7 @@ if st.button("Analyze News"):
                 "gl": "us",
                 "hl": "en",
                 "tbm": "nws",
-                "tbs": "qdr:w",
+                "tbs": "qdr:m",
                 "num": 5
             }
             
